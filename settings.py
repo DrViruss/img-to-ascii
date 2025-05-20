@@ -1,0 +1,3 @@
+FRAME_SEPARATOR = "---FRAME---"
+IMAGE_PATH="img"
+ASCII_PATH="ascii"
