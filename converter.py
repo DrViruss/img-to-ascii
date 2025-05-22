@@ -20,11 +20,11 @@ ASCII_CHARS = "@%#*+=-:. "
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Convert images/GIFs to ASCII format.")
-    parser.add_argument('--no-compress', action='store_true', help='Disable RLE compression')
-    parser.add_argument('--compress-threshold', type=int, default=4, help='Minimum run length for compression')
-    parser.add_argument('--no-diff', action='store_true', help='Disable diff mode for animated GIFs')
-    parser.add_argument('--no-color', action='store_true', help='Disable ANSI color output')
-    parser.add_argument('--width', type=int, default=80, help='Custom width for resized images')
+    parser.add_argument('--no-compress', action='store_true', help="Disable RLE compression")
+    parser.add_argument('--compress-threshold', type=int, default=4, help="Minimum run length for compression")
+    parser.add_argument('--no-diff', action='store_true', help="Disable diff mode for GIFs")
+    parser.add_argument('--color-mode', type=int, choices=[0, 1, 2], default=2, help="0: grayscale, 1: inverted grayscale, 2: color")
+    parser.add_argument('--width', type=int, default=80, help="Custom width for resized images")
     return parser.parse_args()
 
 def resize_image(image, new_width):
@@ -33,16 +33,22 @@ def resize_image(image, new_width):
     new_height = int(new_width * aspect_ratio * 0.55)
     return image.resize((new_width, new_height))
 
-def pixel_to_ascii(pixel, enable_color):
+def pixel_to_ascii(pixel, color_mode):
     r, g, b = pixel[:3]
     brightness = sum((r, g, b)) / 3
-    char = ASCII_CHARS[int(brightness / 255 * (len(ASCII_CHARS) - 1))]
-    if enable_color:
-        return f"\x1b[38;2;{r};{g};{b}m{char}{Style.RESET_ALL}"
+    char_index = int(brightness / 255 * (len(ASCII_CHARS) - 1))
+    if color_mode == 0:
+        return ASCII_CHARS[char_index]
+    elif color_mode == 1:
+        return ASCII_CHARS[::-1][char_index]
     else:
-        return char
+        char = ASCII_CHARS[char_index]
+        return f"\x1b[38;2;{r};{g};{b}m{char}{Style.RESET_ALL}"
 
-def compress_line(line, enable_compression, threshold):
+
+def compress_line(line, enabled, threshold):
+    if not enabled:
+        return line
     result = []
     count = 1
     prev = line[0]
@@ -50,13 +56,13 @@ def compress_line(line, enable_compression, threshold):
         if char == prev:
             count += 1
         else:
-            if enable_compression and count >= threshold:
+            if count >= threshold:
                 result.append(f"{prev}{count}")
             else:
                 result.extend([prev] * count)
             prev = char
             count = 1
-    if enable_compression and count >= threshold:
+    if count >= threshold:
         result.append(f"{prev}{count}")
     else:
         result.extend([prev] * count)
@@ -69,7 +75,7 @@ def image_to_ascii(image: Image.Image, options):
     pixels = image.getdata()
     lines = []
     for y in range(image.height):
-        line = ''.join(pixel_to_ascii(pixels[y * image.width + x], not options.no_color) for x in range(image.width))
+        line = ''.join(pixel_to_ascii(pixels[y * image.width + x], options.color_mode) for x in range(image.width))
         lines.append(compress_line(line, not options.no_compress, options.compress_threshold))
     return lines
 
@@ -106,7 +112,7 @@ def process_static_image(image_path: Path, out_path: Path, options):
     meta = {
         "compressed": not options.no_compress,
         "diff": False,
-        "color": not options.no_color
+        "color": options.color_mode
     }
     save_ascii_file(out_path, ascii_art, meta)
 
@@ -115,15 +121,17 @@ def process_gif_image(gif_path: Path, out_path: Path, options):
     img = Image.open(gif_path)
     frames_ascii = [image_to_ascii(frame.copy(), options) for frame in ImageSequence.Iterator(img)]
     max_height = max(len(frame) for frame in frames_ascii)
-    for frame in frames_ascii:
+    for i, frame in enumerate(frames_ascii):
         while len(frame) < max_height:
-            frame.append('')
+            frame.append(' ' * len(frame[0]))
     if not options.no_diff:
         frames_ascii = diff_frames(frames_ascii)
+    else:
+        frames_ascii = ['\n'.join(frame) for frame in frames_ascii]
     meta = {
         "compressed": not options.no_compress,
         "diff": not options.no_diff,
-        "color": not options.no_color
+        "color": options.color_mode
     }
     save_ascii_file(out_path, f"\n{FRAME_SEPARATOR}\n".join(frames_ascii), meta)
 
@@ -136,7 +144,7 @@ def process_images(options):
             continue
         name = image_file.stem
         ascii_file = ASCII_DIR / f"{name}.{ASCII_EXTENSION}"
-        if ascii_file.exists():
+        if ascii_file.with_suffix(f".{ASCII_EXTENSION}").exists():
             print(f"[!] {ascii_file.name} already converted.")
             continue
         print(f"[→] Converting {image_file.name} into ASCII...")
