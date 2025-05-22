@@ -4,10 +4,12 @@ import sys
 import termios
 import time
 import tty
+import json
+import zlib
 
 from enum import Enum
 from pathlib import Path
-from settings import ASCII_PATH, FRAME_SEPARATOR
+from settings import ASCII_PATH, FRAME_SEPARATOR, ASCII_EXTENSION
 
 ASCII_DIR = Path(ASCII_PATH)
 
@@ -35,12 +37,93 @@ def get_keypress(timeout=None):
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
-def load_ascii_frames(ascii_path: Path):
-    with open(ascii_path, "r", encoding="utf-8") as f:
-        content = f.read()
-    frames = content.split(FRAME_SEPARATOR)
-    return [frame.strip('\n') for frame in frames]
+def decompress_ascii(path: Path):
+    with open(path, "rb") as f:
+        compressed = f.read()
+    decompressed = zlib.decompress(compressed)
+    meta_end = decompressed.find(b'\n')
+    meta_json = decompressed[:meta_end].decode('utf-8')
+    content_bytes = decompressed[meta_end+1:]
+    metadata = json.loads(meta_json)
+    content = content_bytes.decode('utf-8')
+    return metadata, content
 
+import re
+
+def unpack_line(line):
+    result = []
+    i = 0
+    length = len(line)
+
+    while i < length:
+        if line[i] == '\x1b':
+            end = i + 1
+            while end < length and line[end] != 'm':
+                end += 1
+            end = min(end + 1, length)
+            result.append(line[i:end])
+            i = end
+        else:
+            m = re.match(r'([^\d\s\x1b])(\d+)', line[i:])
+            if m:
+                char = m.group(1)
+                count = int(m.group(2))
+                result.append(char * count)
+                i += len(m.group(1)) + len(m.group(2))
+            else:
+                result.append(line[i])
+                i += 1
+    return ''.join(result)
+
+def unpack_content(content, compressed=True):
+    frames_raw = content.split(FRAME_SEPARATOR)
+    frames = []
+    for frame in frames_raw:
+        lines = frame.splitlines()
+        if compressed:
+            lines = [unpack_line(line) for line in lines]
+        frames.append(lines)
+
+    max_height = max(len(frame) for frame in frames)
+    for frame in frames:
+        while len(frame) < max_height:
+            frame.insert(0, '')
+
+    return ['\n'.join(frame) for frame in frames]
+
+def apply_diff(frames):
+    full_frames = [frames[0].splitlines()]
+    for diff_frame in frames[1:]:
+        diff_lines = diff_frame.splitlines()
+        prev_lines = full_frames[-1]
+        new_frame = []
+        for pl, dl in zip(prev_lines, diff_lines):
+            if dl == '=':
+                new_frame.append(pl)
+            else:
+                new_frame.append(dl)
+        full_frames.append(new_frame)
+
+    max_height = max(len(frame) for frame in full_frames)
+    for frame in full_frames:
+        while len(frame) < max_height:
+            frame.insert(0, '')
+
+    return ['\n'.join(frame) for frame in full_frames]
+
+def strip_ansi_codes(text):
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
+    return ansi_escape.sub('', text)
+
+def load_ascii_frames(path: Path):
+    metadata, content = decompress_ascii(path)
+    frames = unpack_content(content, compressed=metadata.get('compressed', True))
+    if metadata.get('diff', False):
+        frames = apply_diff(frames)
+    color_enabled = metadata.get('color', True)
+    if not color_enabled:
+        frames = [strip_ansi_codes(frame) for frame in frames]
+    return frames, metadata
 
 def print_frame(frame, name, index, total):
     clear_screen()
@@ -86,15 +169,15 @@ def display_ascii_loop(frames, file_name, frame_delay=0.12):
 
 
 def main():
-    ascii_files = sorted(ASCII_DIR.glob("*.ascii"))
+    ascii_files = sorted(ASCII_DIR.glob(f"*.{ASCII_EXTENSION}"))
     if not ascii_files:
-        print(f"Cant find any files in \"{ASCII_PATH}\" folder")
+        print(f"Can't find any supported files in \"{ASCII_DIR}\" folder")
         return
 
     index = 0
     while True:
         file_path = ascii_files[index]
-        frames = load_ascii_frames(file_path)
+        frames, metadata = load_ascii_frames(file_path)
         action = display_ascii_loop(frames, file_path.stem)
 
         if action == 'quit':
