@@ -7,8 +7,9 @@ on:
     branches: [ "master" ]
 
 permissions:
-  contents: write   # Для создания тегов и релизов
-  pull-requests: read  # Для чтения описания PR
+  contents: write      # Для тегов/релизов
+  issues: read         # Для чтения PR body
+  pull-requests: read  # Для PR событий
 
 jobs:
   test:
@@ -36,7 +37,7 @@ jobs:
         run: |
           pytest tests/ -v
 
-  # Релиз только при push в master (т.е. после merge PR)
+  # Релиз только при push в master (после merge PR)
   release:
     needs: test
     if: github.ref == 'refs/heads/master' && github.event_name == 'push'
@@ -45,9 +46,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Нужно для истории и merge commit
+          fetch-depth: 0  # Для истории коммитов
 
-      # Получаем номер версии из последнего тега или создаём v0.1.0
+      # Установка GitHub CLI (gh) — обязательно!
+      - name: Install GitHub CLI
+        run: |
+          sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-key C99B11DEB97541F0
+          sudo apt-add-repository https://cli.github.com/packages
+          sudo apt update
+          sudo apt install gh
+
+      # Генерация версии (patch bump)
       - name: Generate version
         id: version
         run: |
@@ -62,33 +71,34 @@ jobs:
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "tag=v$NEW_VERSION" >> $GITHUB_OUTPUT
 
-      # Берём описание PR из merge commit
+      # Получение PR body из merge commit (с фиксом auth)
       - name: Get PR description from merge commit
         id: pr_body
+        env:
+          GH_TOKEN: ${{ github.token }}  # Используем GITHUB_TOKEN как GH_TOKEN
         run: |
           MERGE_COMMIT=$(git log -1 --pretty=%B)
-          # Если это merge commit от PR — берём тело
+          BODY="Автоматический релиз без описания PR."
+          
           if [[ $MERGE_COMMIT == Merge\ pull\ request* ]]; then
             PR_NUMBER=$(echo "$MERGE_COMMIT" | head -1 | grep -o '#[0-9]\+' | tr -d '#')
             if [ -n "$PR_NUMBER" ]; then
-              BODY=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER -q .body)
-            else
-              BODY="Автоматический релиз"
+              # gh api с явным token (если env не сработает)
+              PR_BODY=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq .body --header "Authorization: token $GH_TOKEN" 2>/dev/null || echo "")
+              if [ -n "$PR_BODY" ]; then
+                BODY="$PR_BODY"
+              fi
             fi
-          else
-            BODY="Обновление кода"
           fi
-          # Экранируем для JSON
-          BODY="${BODY//%/\%}"
+          
+          # Экранирование для multiline в body
+          BODY="${BODY//%/%%}"
           BODY="${BODY//$'\n'/\\n}"
-          BODY="${BODY//$'\r'/\\r}"
           echo "body<<EOF" >> $GITHUB_OUTPUT
           echo "$BODY" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-        env:
-          GH_TOKEN: ${{ github.token }}
 
-      # Создаём пустые папки ascii/ и img/
+      # Создание пустых папок ascii/ и img/
       - name: Create empty directories
         run: |
           mkdir -p release-build/ascii
@@ -96,7 +106,7 @@ jobs:
           touch release-build/ascii/.gitkeep
           touch release-build/img/.gitkeep
 
-      # Копируем нужные файлы
+      # Копируем только нужные файлы (тесты/ .github/ игнорируем)
       - name: Copy release files
         run: |
           cp viewer.py converter.py settings.py requirements.txt release-build/
@@ -107,11 +117,14 @@ jobs:
         run: |
           cd release-build
           zip -r ../ascii-converter-${{ steps.version.outputs.version }}.zip .
-        working-directory: .
+          cd ..
 
-      # Создаём GitHub Release
+      # Создаём GitHub Release (обновлённая версия action)
       - name: Create GitHub Release
-        uses: actions/create-release@v1
+        id: create_release
+        uses: actions/create-release@v4
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           release_name: ASCII Converter v${{ steps.version.outputs.version }}
@@ -125,15 +138,15 @@ jobs:
             - `requirements.txt`
             - Пустые папки: `ascii/`, `img/`
 
-            Скачайте архив ниже.
+            Скачайте ZIP ниже.
           draft: false
           prerelease: false
 
-      # Загружаем ZIP как asset
+      # Загружаем ZIP как asset (обновлённая версия)
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: ./ascii-converter-${{ steps.version.outputs.version }}.zip
