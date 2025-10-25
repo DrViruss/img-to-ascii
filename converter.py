@@ -23,9 +23,16 @@ def parse_arguments():
     parser.add_argument('--no-compress', action='store_true', help="Disable RLE compression")
     parser.add_argument('--compress-threshold', type=int, default=4, help="Minimum run length for compression")
     parser.add_argument('--no-diff', action='store_true', help="Disable diff mode for GIFs")
-    parser.add_argument('--color-mode', type=int, choices=[0, 1, 2], default=2, help="0: grayscale, 1: inverted grayscale, 2: color")
+    parser.add_argument('--color-mode', type=int, choices=[0, 1, 2], default=2,
+                        help="0: grayscale, 1: inverted grayscale, 2: color")
     parser.add_argument('--width', type=int, default=80, help="Custom width for resized images")
+    parser.add_argument('--background-color', type=str, default="#000000",
+                        help="Background color for transparent areas in hex (e.g., #FFFFFF for white)")
     return parser.parse_args()
+
+def hex_to_rgb(hex_color):
+    hex_color = hex_color.lstrip('#')
+    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
 
 def resize_image(image, new_width):
     width, height = image.size
@@ -112,26 +119,67 @@ def process_static_image(image_path: Path, out_path: Path, options):
     meta = {
         "compressed": not options.no_compress,
         "diff": False,
-        "color": options.color_mode
+        "color": options.color_mode == 2
     }
     save_ascii_file(out_path, ascii_art, meta)
 
 
+def extract_composited_frames(img, background_rgb):
+    frames = []
+    delays = []
+    canvas = Image.new("RGBA", img.size, background_rgb + (0,))
+    prev_canvas = None
+
+    for frame_num in range(img.n_frames):
+        img.seek(frame_num)
+        disposal = img.info.get('disposal', 2)
+        duration = img.info.get('duration', 120)
+        frame = img.convert("RGBA")
+        if img.tile:
+            tile = img.tile[0]
+            offset = tile[1][:2]
+            box = tile[1]
+            frame = frame.crop(box)
+        else:
+            offset = (0, 0)
+
+        if disposal == 2:
+            canvas.paste(background_rgb + (255,), (0, 0) + img.size)
+        elif disposal == 3 and prev_canvas is not None:
+            canvas = prev_canvas.copy()
+        canvas.alpha_composite(frame, offset)
+
+        frames.append(canvas.copy().convert("RGBA"))
+        delays.append(duration)
+
+        prev_canvas = canvas.copy()
+
+    return frames, delays
+
+
 def process_gif_image(gif_path: Path, out_path: Path, options):
     img = Image.open(gif_path)
-    frames_ascii = [image_to_ascii(frame.copy(), options) for frame in ImageSequence.Iterator(img)]
+    background_rgb = hex_to_rgb(options.background_color)
+    composited_frames, delays = extract_composited_frames(img, background_rgb)
+    frames_ascii = []
+    for frame in composited_frames:
+        frames_ascii.append(image_to_ascii(frame, options))
     max_height = max(len(frame) for frame in frames_ascii)
-    for i, frame in enumerate(frames_ascii):
+    compress_enabled = not options.no_compress
+    threshold = options.compress_threshold
+    empty_line = compress_line(' ' * options.width, compress_enabled, threshold)
+    for frame in frames_ascii:
         while len(frame) < max_height:
-            frame.append(' ' * len(frame[0]))
+            frame.append(empty_line)
     if not options.no_diff:
         frames_ascii = diff_frames(frames_ascii)
     else:
         frames_ascii = ['\n'.join(frame) for frame in frames_ascii]
     meta = {
-        "compressed": not options.no_compress,
+        "compressed": compress_enabled,
         "diff": not options.no_diff,
-        "color": options.color_mode
+        "color": options.color_mode == 2,
+        "delays": delays
     }
     save_ascii_file(out_path, f"\n{FRAME_SEPARATOR}\n".join(frames_ascii), meta)
 
@@ -144,7 +192,7 @@ def process_images(options):
             continue
         name = image_file.stem
         ascii_file = ASCII_DIR / f"{name}.{ASCII_EXTENSION}"
-        if ascii_file.with_suffix(f".{ASCII_EXTENSION}").exists():
+        if ascii_file.exists():
             print(f"[!] {ascii_file.name} already converted.")
             continue
         print(f"[→] Converting {image_file.name} into ASCII...")
