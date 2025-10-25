@@ -64,7 +64,7 @@ def unpack_line(line):
             result.append(line[i:end])
             i = end
         else:
-            m = re.match(r'([^\d\s\x1b])(\d+)', line[i:])
+            m = re.match(r'([^\d\x1b])(\d+)', line[i:])
             if m:
                 char = m.group(1)
                 count = int(m.group(2))
