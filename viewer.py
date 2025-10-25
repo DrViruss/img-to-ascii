@@ -69,7 +69,7 @@ def unpack_line(line):
                 char = m.group(1)
                 count = int(m.group(2))
                 result.append(char * count)
-                i += len(m.group(1)) + len(m.group(2))
+                i += len(m.group(0))
             else:
                 result.append(line[i])
                 i += 1
@@ -97,7 +97,10 @@ def apply_diff(frames):
         diff_lines = diff_frame.splitlines()
         prev_lines = full_frames[-1]
         new_frame = []
-        for pl, dl in zip(prev_lines, diff_lines):
+        max_len = max(len(prev_lines), len(diff_lines))
+        for j in range(max_len):
+            pl = prev_lines[j] if j < len(prev_lines) else ''
+            dl = diff_lines[j] if j < len(diff_lines) else ''
             if dl == '=':
                 new_frame.append(pl)
             else:
@@ -133,17 +136,21 @@ def print_frame(frame, name, index, total):
     print(f"[Frame] {index + 1} / {total}")
     print("[a/d] Prv/Nxt\t|\t[Space] Stop/Play\t|\t[x/c] Prv/Nxt frame\t|\t[q] Quit")
 
-def display_ascii_loop(frames, file_name, frame_delay=0.12):
+def display_ascii_loop(frames, file_name, metadata):
     total_frames = len(frames)
     frame_index = 0
     mode = Mode.AUTO
     draw = True
-
+    delays = metadata.get('delays')
+    default_delay = 0.12
     while True:
         if draw:
             print_frame(frames[frame_index], file_name, frame_index, total_frames)
-
-        timeout = frame_delay if mode == Mode.AUTO else None
+        if mode == Mode.AUTO and total_frames > 1:
+            delay_ms = delays[frame_index] if delays else default_delay * 1000
+            timeout = delay_ms / 1000.0
+        else:
+            timeout = None
         key = get_keypress(timeout=timeout)
         if key:
             key = key.lower()
@@ -177,9 +184,12 @@ def main():
     index = 0
     while True:
         file_path = ascii_files[index]
-        frames, metadata = load_ascii_frames(file_path)
-        action = display_ascii_loop(frames, file_path.stem)
-
+        try:
+            frames, metadata = load_ascii_frames(file_path)
+            action = display_ascii_loop(frames, file_path.stem, metadata)
+        except Exception as e:
+            print(f"[!] Error loading {file_path.name}: {e}")
+            action = 'next'
         if action == 'quit':
             clear_screen()
             print("\nBye!\n")

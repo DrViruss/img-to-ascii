@@ -112,26 +112,34 @@ def process_static_image(image_path: Path, out_path: Path, options):
     meta = {
         "compressed": not options.no_compress,
         "diff": False,
-        "color": options.color_mode
+        "color": options.color_mode == 2
     }
     save_ascii_file(out_path, ascii_art, meta)
 
 
 def process_gif_image(gif_path: Path, out_path: Path, options):
     img = Image.open(gif_path)
-    frames_ascii = [image_to_ascii(frame.copy(), options) for frame in ImageSequence.Iterator(img)]
+    frames_ascii = []
+    delays = []
+    for frame in ImageSequence.Iterator(img):
+        frames_ascii.append(image_to_ascii(frame.copy(), options))
+        delays.append(frame.info.get('duration', 120))
     max_height = max(len(frame) for frame in frames_ascii)
-    for i, frame in enumerate(frames_ascii):
+    compress_enabled = not options.no_compress
+    threshold = options.compress_threshold
+    empty_line = compress_line(' ' * options.width, compress_enabled, threshold)
+    for frame in frames_ascii:
         while len(frame) < max_height:
-            frame.append(' ' * len(frame[0]))
+            frame.append(empty_line)
     if not options.no_diff:
         frames_ascii = diff_frames(frames_ascii)
     else:
         frames_ascii = ['\n'.join(frame) for frame in frames_ascii]
     meta = {
-        "compressed": not options.no_compress,
+        "compressed": compress_enabled,
         "diff": not options.no_diff,
-        "color": options.color_mode
+        "color": options.color_mode == 2,
+        "delays": delays
     }
     save_ascii_file(out_path, f"\n{FRAME_SEPARATOR}\n".join(frames_ascii), meta)
 
@@ -144,7 +152,7 @@ def process_images(options):
             continue
         name = image_file.stem
         ascii_file = ASCII_DIR / f"{name}.{ASCII_EXTENSION}"
-        if ascii_file.with_suffix(f".{ASCII_EXTENSION}").exists():
+        if ascii_file.exists():
             print(f"[!] {ascii_file.name} already converted.")
             continue
         print(f"[→] Converting {image_file.name} into ASCII...")
