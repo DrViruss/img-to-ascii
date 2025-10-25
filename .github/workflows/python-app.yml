@@ -1,37 +1,141 @@
-# This workflow will install Python dependencies, run tests and lint with a single version of Python
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
-
-name: Python application
+name: CI & Release
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "master", "develop" ]
   pull_request:
     branches: [ "master" ]
 
 permissions:
-  contents: read
+  contents: write   # Для создания тегов и релизов
+  pull-requests: read  # Для чтения описания PR
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python 3.13
-      uses: actions/setup-python@v3
-      with:
-        python-version: "3.13"
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install flake8 pytest
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-    - name: Test with pytest
-      run: |
-        pytest tests/ -v
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v3
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 pytest
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Lint with flake8
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Test with pytest
+        run: |
+          pytest tests/ -v
+
+  # Релиз только при push в master (т.е. после merge PR)
+  release:
+    needs: test
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Нужно для истории и merge commit
+
+      # Получаем номер версии из последнего тега или создаём v0.1.0
+      - name: Generate version
+        id: version
+        run: |
+          if git describe --tags --abbrev=0 2>/dev/null; then
+            TAG=$(git describe --tags --abbrev=0)
+            VERSION=${TAG#v}
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+            NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          else
+            NEW_VERSION="0.1.0"
+          fi
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      # Берём описание PR из merge commit
+      - name: Get PR description from merge commit
+        id: pr_body
+        run: |
+          MERGE_COMMIT=$(git log -1 --pretty=%B)
+          # Если это merge commit от PR — берём тело
+          if [[ $MERGE_COMMIT == Merge\ pull\ request* ]]; then
+            PR_NUMBER=$(echo "$MERGE_COMMIT" | head -1 | grep -o '#[0-9]\+' | tr -d '#')
+            if [ -n "$PR_NUMBER" ]; then
+              BODY=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER -q .body)
+            else
+              BODY="Автоматический релиз"
+            fi
+          else
+            BODY="Обновление кода"
+          fi
+          # Экранируем для JSON
+          BODY="${BODY//%/\%}"
+          BODY="${BODY//$'\n'/\\n}"
+          BODY="${BODY//$'\r'/\\r}"
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # Создаём пустые папки ascii/ и img/
+      - name: Create empty directories
+        run: |
+          mkdir -p release-build/ascii
+          mkdir -p release-build/img
+          touch release-build/ascii/.gitkeep
+          touch release-build/img/.gitkeep
+
+      # Копируем нужные файлы
+      - name: Copy release files
+        run: |
+          cp viewer.py converter.py settings.py requirements.txt release-build/
+          echo "Релиз собран: viewer.py, converter.py, settings.py, requirements.txt + пустые ascii/, img/"
+
+      # Создаём ZIP
+      - name: Create ZIP archive
+        run: |
+          cd release-build
+          zip -r ../ascii-converter-${{ steps.version.outputs.version }}.zip .
+        working-directory: .
+
+      # Создаём GitHub Release
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          release_name: ASCII Converter v${{ steps.version.outputs.version }}
+          body: |
+            ${{ steps.pr_body.outputs.body }}
+
+            ## Что в релизе:
+            - `viewer.py`
+            - `converter.py`
+            - `settings.py`
+            - `requirements.txt`
+            - Пустые папки: `ascii/`, `img/`
+
+            Скачайте архив ниже.
+          draft: false
+          prerelease: false
+
+      # Загружаем ZIP как asset
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./ascii-converter-${{ steps.version.outputs.version }}.zip
+          asset_name: ascii-converter-${{ steps.version.outputs.version }}.zip
+          asset_content_type: application/zip
